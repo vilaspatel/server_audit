@@ -55,7 +55,7 @@ This installs the libraries listed in `requirements.txt` into an isolated
 virtualenv for the pack:
 
 ```
-delinea-secret-server-python-sdk
+python-tss-sdk
 paramiko
 requests
 ```
