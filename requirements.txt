@@ -1,3 +1,2 @@
-python-tss-sdk
 paramiko
 requests

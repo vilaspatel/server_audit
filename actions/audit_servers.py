@@ -1,13 +1,7 @@
-import json
 import socket
 
 import paramiko
 import requests
-from delinea.secrets.server import (
-    AccessTokenAuthorizer,
-    SecretServer,
-    SecretServerError,
-)
 from st2common.runners.base_action import Action
 
 _PAGE_SIZE = 100
@@ -19,7 +13,8 @@ class AuditServersAction(Action):
     2. Find the requested folder by name and list every secret it contains.
     3. For each secret: extract the SSH target from the 'machine' field,
        username from 'username', and password from 'password'.
-    4. SSH into each target host, run `hostname`, and collect the result.
+    4. SSH into each target host, run `hostname` and read /etc/os-release,
+       and collect the result.
     """
 
     def run(self, folder_name, ss_kv_token_key, ss_kv_url_key, ssh_port, ssh_timeout):
@@ -29,26 +24,14 @@ class AuditServersAction(Action):
         ).rstrip("/")
 
         if not ss_token:
-            raise Exception(
-                f"ST2 KV key '{ss_kv_token_key}' not found or empty."
-            )
+            raise Exception(f"ST2 KV key '{ss_kv_token_key}' not found or empty.")
         if not ss_url:
-            raise Exception(
-                f"ST2 KV key '{ss_kv_url_key}' not found or empty."
-            )
-
-        try:
-            authorizer = AccessTokenAuthorizer(ss_token, ss_url)
-            client = SecretServer(ss_url, authorizer)
-        except SecretServerError as exc:
-            raise Exception(
-                f"Failed to initialize Secret Server client: {exc.message}"
-            )
+            raise Exception(f"ST2 KV key '{ss_kv_url_key}' not found or empty.")
 
         folder_id = self._resolve_folder_id(ss_url, ss_token, folder_name)
         self.logger.info(f"Resolved folder '{folder_name}' to id={folder_id}")
 
-        secrets = self._list_folder_secrets(client, folder_id)
+        secrets = self._list_folder_secrets(ss_url, ss_token, folder_id)
         self.logger.info(f"Found {len(secrets)} secret(s) in folder '{folder_name}'")
 
         if not secrets:
@@ -61,7 +44,7 @@ class AuditServersAction(Action):
             if not secret_name or not secret_id:
                 self.logger.warning(f"Skipping entry with missing name or id: {secret_info}")
                 continue
-            result = self._audit_server(client, secret_id, secret_name, ssh_port, ssh_timeout)
+            result = self._audit_server(ss_url, ss_token, secret_id, secret_name, ssh_port, ssh_timeout)
             self.logger.info(
                 f"{secret_name} ({result.get('target_host')}): "
                 f"status={result['status']}  "
@@ -74,90 +57,77 @@ class AuditServersAction(Action):
         return results
 
     # ------------------------------------------------------------------
-    # Secret Server helpers
+    # Secret Server REST helpers (Bearer token, no SDK)
     # ------------------------------------------------------------------
 
-    def _resolve_folder_id(self, ss_url, ss_token, folder_name):
-        """Look up the folder by name and return its integer id."""
-        url = f"{ss_url}/api/v1/folders"
+    def _api_get(self, ss_url, ss_token, path, params=None):
         headers = {"Authorization": f"Bearer {ss_token}"}
-        params = {"filter.searchText": folder_name, "take": 50}
-
+        url = f"{ss_url}{path}"
         try:
             response = requests.get(url, headers=headers, params=params, timeout=30)
             response.raise_for_status()
-            data = response.json()
-        except requests.RequestException as exc:
+            return response.json()
+        except requests.HTTPError as exc:
             raise Exception(
-                f"Failed to query Secret Server folders endpoint: {exc}"
+                f"Secret Server API error [{exc.response.status_code}] for {path}: {exc}"
             )
+        except requests.RequestException as exc:
+            raise Exception(f"Failed to reach Secret Server at {url}: {exc}")
 
+    def _resolve_folder_id(self, ss_url, ss_token, folder_name):
+        data = self._api_get(
+            ss_url, ss_token, "/api/v1/folders",
+            {"filter.searchText": folder_name, "take": 50},
+        )
         records = data.get("records", [])
-
-        # Prefer an exact case-insensitive match before falling back to any result.
         folder_name_lower = folder_name.strip().lower()
+
         for record in records:
             if (record.get("folderName") or "").strip().lower() == folder_name_lower:
                 return record["id"]
 
         if records:
-            # Partial match – use the first result and warn.
             self.logger.warning(
-                f"No exact match for folder '{folder_name}'; using '{records[0].get('folderName')}' (id={records[0]['id']})."
+                f"No exact match for folder '{folder_name}'; "
+                f"using '{records[0].get('folderName')}' (id={records[0]['id']})."
             )
             return records[0]["id"]
 
-        raise Exception(
-            f"Folder '{folder_name}' not found in Secret Server."
-        )
+        raise Exception(f"Folder '{folder_name}' not found in Secret Server.")
 
-    def _list_folder_secrets(self, client, folder_id):
-        """Return all secret summary records for the given folder (paginated)."""
+    def _list_folder_secrets(self, ss_url, ss_token, folder_id):
         all_records = []
         skip = 0
-
         while True:
-            query_params = {
-                "filter.folderId": folder_id,
-                "filter.includeSubFolders": False,
-                "take": _PAGE_SIZE,
-                "skip": skip,
-            }
-            try:
-                raw = client.search_secrets(query_params=query_params)
-                payload = json.loads(raw)
-            except SecretServerError as exc:
-                raise Exception(
-                    f"Secret search failed for folder id={folder_id}: {exc.message}"
-                )
-            except json.JSONDecodeError as exc:
-                raise Exception(
-                    f"Secret Server returned invalid JSON during folder listing: {exc}"
-                )
-
-            page_records = payload.get("records", [])
-            all_records.extend(page_records)
-
-            total = payload.get("total", len(all_records))
-            if len(all_records) >= total or not page_records:
+            data = self._api_get(
+                ss_url, ss_token, "/api/v1/secrets",
+                {
+                    "filter.folderId": folder_id,
+                    "filter.includeSubFolders": False,
+                    "take": _PAGE_SIZE,
+                    "skip": skip,
+                },
+            )
+            page = data.get("records", [])
+            all_records.extend(page)
+            if len(all_records) >= data.get("total", len(all_records)) or not page:
                 break
             skip += _PAGE_SIZE
-
         return all_records
+
+    def _get_secret(self, ss_url, ss_token, secret_id):
+        return self._api_get(ss_url, ss_token, f"/api/v1/secrets/{secret_id}")
 
     # ------------------------------------------------------------------
     # Per-server audit
     # ------------------------------------------------------------------
 
-    def _audit_server(self, client, secret_id, secret_name, ssh_port, ssh_timeout):
-        """Fetch credentials from the secret, resolve the target host from the
-        'machine' field, then SSH to it and read its hostname."""
+    def _audit_server(self, ss_url, ss_token, secret_id, secret_name, ssh_port, ssh_timeout):
         try:
-            secret = client.get_secret(secret_id, fetch_file_attachments=False)
-        except SecretServerError as exc:
-            return self._result(secret_name, None, None, None, f"Secret fetch failed: {exc.message}")
+            secret = self._get_secret(ss_url, ss_token, secret_id)
+        except Exception as exc:
+            return self._result(secret_name, None, None, None, f"Secret fetch failed: {exc}")
 
-        # The FQDN/IP to connect to lives in the 'machine' field, not the secret name.
         target_host = (
             self._get_field_value(secret, ["machine", "host", "server"]) or ""
         ).strip()
@@ -165,13 +135,9 @@ class AuditServersAction(Action):
         password = self._get_field_value(secret, ["password", "pass", "pw"])
 
         if not target_host:
-            return self._result(
-                secret_name, None, None, None, "Secret is missing the 'machine' field."
-            )
+            return self._result(secret_name, None, None, None, "Secret is missing the 'machine' field.")
         if not username or not password:
-            return self._result(
-                secret_name, target_host, None, None, "Secret is missing username or password field."
-            )
+            return self._result(secret_name, target_host, None, None, "Secret is missing username or password field.")
 
         return self._ssh_probe(secret_name, target_host, username, password, ssh_port, ssh_timeout)
 
