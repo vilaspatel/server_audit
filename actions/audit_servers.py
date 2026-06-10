@@ -8,7 +8,6 @@ from delinea.secrets.server import (
     SecretServer,
     SecretServerError,
 )
-from st2common.exceptions import ActionExecutionException
 from st2common.runners.base_action import Action
 
 _PAGE_SIZE = 100
@@ -30,11 +29,11 @@ class AuditServersAction(Action):
         ).rstrip("/")
 
         if not ss_token:
-            raise ActionExecutionException(
+            raise Exception(
                 f"ST2 KV key '{ss_kv_token_key}' not found or empty."
             )
         if not ss_url:
-            raise ActionExecutionException(
+            raise Exception(
                 f"ST2 KV key '{ss_kv_url_key}' not found or empty."
             )
 
@@ -42,7 +41,7 @@ class AuditServersAction(Action):
             authorizer = AccessTokenAuthorizer(ss_token, ss_url)
             client = SecretServer(ss_url, authorizer)
         except SecretServerError as exc:
-            raise ActionExecutionException(
+            raise Exception(
                 f"Failed to initialize Secret Server client: {exc.message}"
             )
 
@@ -89,7 +88,7 @@ class AuditServersAction(Action):
             response.raise_for_status()
             data = response.json()
         except requests.RequestException as exc:
-            raise ActionExecutionException(
+            raise Exception(
                 f"Failed to query Secret Server folders endpoint: {exc}"
             )
 
@@ -108,7 +107,7 @@ class AuditServersAction(Action):
             )
             return records[0]["id"]
 
-        raise ActionExecutionException(
+        raise Exception(
             f"Folder '{folder_name}' not found in Secret Server."
         )
 
@@ -128,11 +127,11 @@ class AuditServersAction(Action):
                 raw = client.search_secrets(query_params=query_params)
                 payload = json.loads(raw)
             except SecretServerError as exc:
-                raise ActionExecutionException(
+                raise Exception(
                     f"Secret search failed for folder id={folder_id}: {exc.message}"
                 )
             except json.JSONDecodeError as exc:
-                raise ActionExecutionException(
+                raise Exception(
                     f"Secret Server returned invalid JSON during folder listing: {exc}"
                 )
 

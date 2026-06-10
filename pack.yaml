@@ -9,4 +9,4 @@ keywords:
   - ssh
   - audit
 python_versions:
-  - ">=3.8,<3.12"
+  - "3"
