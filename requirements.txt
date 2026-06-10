@@ -1,0 +1,3 @@
+delinea-secret-server-python-sdk
+paramiko
+requests

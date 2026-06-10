@@ -1,0 +1,12 @@
+---
+name: server_audit
+description: Enumerate secrets in a Delinea Secret Server folder and SSH-probe each server for its hostname.
+version: 0.1.0
+author: DevOps Team
+email: devops@example.com
+keywords:
+  - secret-server
+  - ssh
+  - audit
+python_versions:
+  - ">=3.8,<3.12"

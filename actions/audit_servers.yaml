@@ -1,0 +1,35 @@
+---
+name: audit_servers
+description: >
+  List every secret in a Secret Server folder, SSH into each server using the
+  credentials stored in the secret (machine / username / password fields), and
+  return the live hostname and OS version. The Secret Server SDK token is read
+  from ST2 KV (encrypted).
+runner_type: python-script
+entry_point: audit_servers.py
+enabled: true
+parameters:
+  folder_name:
+    type: string
+    description: Exact name of the Secret Server folder to enumerate.
+    required: true
+  ss_kv_token_key:
+    type: string
+    description: ST2 KV key that holds the Secret Server SDK token (stored encrypted).
+    required: false
+    default: ss_sdk_token
+  ss_kv_url_key:
+    type: string
+    description: ST2 KV key that holds the Secret Server base URL.
+    required: false
+    default: ss_url
+  ssh_port:
+    type: integer
+    description: SSH port to connect on.
+    required: false
+    default: 22
+  ssh_timeout:
+    type: integer
+    description: SSH connection timeout in seconds.
+    required: false
+    default: 10

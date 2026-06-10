@@ -1,0 +1,300 @@
+import json
+import socket
+
+import paramiko
+import requests
+from delinea.secrets.server import (
+    AccessTokenAuthorizer,
+    SecretServer,
+    SecretServerError,
+)
+from st2common.exceptions import ActionExecutionException
+from st2common.runners.base_action import Action
+
+_PAGE_SIZE = 100
+
+
+class AuditServersAction(Action):
+    """
+    1. Read the Secret Server SDK token and URL from ST2 KV.
+    2. Find the requested folder by name and list every secret it contains.
+    3. For each secret: extract the SSH target from the 'machine' field,
+       username from 'username', and password from 'password'.
+    4. SSH into each target host, run `hostname`, and collect the result.
+    """
+
+    def run(self, folder_name, ss_kv_token_key, ss_kv_url_key, ssh_port, ssh_timeout):
+        ss_token = self.action_service.get_value(ss_kv_token_key, decrypt=True, local=False)
+        ss_url = (
+            self.action_service.get_value(ss_kv_url_key, decrypt=False, local=False) or ""
+        ).rstrip("/")
+
+        if not ss_token:
+            raise ActionExecutionException(
+                f"ST2 KV key '{ss_kv_token_key}' not found or empty."
+            )
+        if not ss_url:
+            raise ActionExecutionException(
+                f"ST2 KV key '{ss_kv_url_key}' not found or empty."
+            )
+
+        try:
+            authorizer = AccessTokenAuthorizer(ss_token, ss_url)
+            client = SecretServer(ss_url, authorizer)
+        except SecretServerError as exc:
+            raise ActionExecutionException(
+                f"Failed to initialize Secret Server client: {exc.message}"
+            )
+
+        folder_id = self._resolve_folder_id(ss_url, ss_token, folder_name)
+        self.logger.info(f"Resolved folder '{folder_name}' to id={folder_id}")
+
+        secrets = self._list_folder_secrets(client, folder_id)
+        self.logger.info(f"Found {len(secrets)} secret(s) in folder '{folder_name}'")
+
+        if not secrets:
+            return []
+
+        results = []
+        for secret_info in secrets:
+            secret_name = (secret_info.get("name") or "").strip()
+            secret_id = secret_info.get("id")
+            if not secret_name or not secret_id:
+                self.logger.warning(f"Skipping entry with missing name or id: {secret_info}")
+                continue
+            result = self._audit_server(client, secret_id, secret_name, ssh_port, ssh_timeout)
+            self.logger.info(
+                f"{secret_name} ({result.get('target_host')}): "
+                f"status={result['status']}  "
+                f"ssh_hostname={result.get('ssh_hostname')}  "
+                f"os_version={result.get('os_version')}  "
+                f"error={result.get('error')}"
+            )
+            results.append(result)
+
+        return results
+
+    # ------------------------------------------------------------------
+    # Secret Server helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_folder_id(self, ss_url, ss_token, folder_name):
+        """Look up the folder by name and return its integer id."""
+        url = f"{ss_url}/api/v1/folders"
+        headers = {"Authorization": f"Bearer {ss_token}"}
+        params = {"filter.searchText": folder_name, "take": 50}
+
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+        except requests.RequestException as exc:
+            raise ActionExecutionException(
+                f"Failed to query Secret Server folders endpoint: {exc}"
+            )
+
+        records = data.get("records", [])
+
+        # Prefer an exact case-insensitive match before falling back to any result.
+        folder_name_lower = folder_name.strip().lower()
+        for record in records:
+            if (record.get("folderName") or "").strip().lower() == folder_name_lower:
+                return record["id"]
+
+        if records:
+            # Partial match – use the first result and warn.
+            self.logger.warning(
+                f"No exact match for folder '{folder_name}'; using '{records[0].get('folderName')}' (id={records[0]['id']})."
+            )
+            return records[0]["id"]
+
+        raise ActionExecutionException(
+            f"Folder '{folder_name}' not found in Secret Server."
+        )
+
+    def _list_folder_secrets(self, client, folder_id):
+        """Return all secret summary records for the given folder (paginated)."""
+        all_records = []
+        skip = 0
+
+        while True:
+            query_params = {
+                "filter.folderId": folder_id,
+                "filter.includeSubFolders": False,
+                "take": _PAGE_SIZE,
+                "skip": skip,
+            }
+            try:
+                raw = client.search_secrets(query_params=query_params)
+                payload = json.loads(raw)
+            except SecretServerError as exc:
+                raise ActionExecutionException(
+                    f"Secret search failed for folder id={folder_id}: {exc.message}"
+                )
+            except json.JSONDecodeError as exc:
+                raise ActionExecutionException(
+                    f"Secret Server returned invalid JSON during folder listing: {exc}"
+                )
+
+            page_records = payload.get("records", [])
+            all_records.extend(page_records)
+
+            total = payload.get("total", len(all_records))
+            if len(all_records) >= total or not page_records:
+                break
+            skip += _PAGE_SIZE
+
+        return all_records
+
+    # ------------------------------------------------------------------
+    # Per-server audit
+    # ------------------------------------------------------------------
+
+    def _audit_server(self, client, secret_id, secret_name, ssh_port, ssh_timeout):
+        """Fetch credentials from the secret, resolve the target host from the
+        'machine' field, then SSH to it and read its hostname."""
+        try:
+            secret = client.get_secret(secret_id, fetch_file_attachments=False)
+        except SecretServerError as exc:
+            return self._result(secret_name, None, None, None, f"Secret fetch failed: {exc.message}")
+
+        # The FQDN/IP to connect to lives in the 'machine' field, not the secret name.
+        target_host = (
+            self._get_field_value(secret, ["machine", "host", "server"]) or ""
+        ).strip()
+        username = self._get_field_value(secret, ["username", "user", "login"])
+        password = self._get_field_value(secret, ["password", "pass", "pw"])
+
+        if not target_host:
+            return self._result(
+                secret_name, None, None, None, "Secret is missing the 'machine' field."
+            )
+        if not username or not password:
+            return self._result(
+                secret_name, target_host, None, None, "Secret is missing username or password field."
+            )
+
+        return self._ssh_probe(secret_name, target_host, username, password, ssh_port, ssh_timeout)
+
+    # Line 0: hostname; line 1: PRETTY_NAME from /etc/os-release,
+    # falling back to `uname -sr` on systems without /etc/os-release.
+    _PROBE_CMD = (
+        "hostname; "
+        "(awk -F'\"' '/^PRETTY_NAME/{print $2}' /etc/os-release 2>/dev/null || uname -sr)"
+    )
+
+    def _ssh_probe(self, secret_name, target_host, username, password, port, timeout):
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            # ── Phase 1: establish the connection ──────────────────────────
+            try:
+                ssh.connect(
+                    target_host,
+                    port=port,
+                    username=username,
+                    password=password,
+                    timeout=timeout,
+                    look_for_keys=False,
+                    allow_agent=False,
+                )
+            except paramiko.AuthenticationException:
+                return self._result(
+                    secret_name, target_host, None, None,
+                    f"Authentication failed for user '{username}' — check the password in Secret Server.",
+                )
+            except paramiko.NoValidConnectionsError as exc:
+                return self._result(
+                    secret_name, target_host, None, None,
+                    f"Could not open any SSH connections to {target_host}:{port}: {exc}",
+                )
+            except paramiko.SSHException as exc:
+                return self._result(
+                    secret_name, target_host, None, None,
+                    f"SSH handshake/banner error connecting to {target_host}:{port}: {exc}",
+                )
+            except socket.gaierror as exc:
+                return self._result(
+                    secret_name, target_host, None, None,
+                    f"DNS resolution failed for '{target_host}': {exc.strerror}",
+                )
+            except socket.timeout:
+                return self._result(
+                    secret_name, target_host, None, None,
+                    f"Connection timed out after {timeout}s — {target_host}:{port} is unreachable or too slow.",
+                )
+            except ConnectionRefusedError:
+                return self._result(
+                    secret_name, target_host, None, None,
+                    f"Connection refused — nothing is listening on {target_host}:{port}.",
+                )
+            except OSError as exc:
+                return self._result(
+                    secret_name, target_host, None, None,
+                    f"Network error connecting to {target_host}:{port}: {exc}",
+                )
+
+            # ── Phase 2: run the probe command ─────────────────────────────
+            try:
+                _, stdout, stderr = ssh.exec_command(self._PROBE_CMD, timeout=timeout)
+                output = stdout.read().decode()
+                stderr_text = stderr.read().decode().strip()
+            except socket.timeout:
+                return self._result(
+                    secret_name, target_host, None, None,
+                    f"Remote command timed out after {timeout}s.",
+                )
+            except paramiko.SSHException as exc:
+                return self._result(
+                    secret_name, target_host, None, None,
+                    f"Failed to execute remote command: {exc}",
+                )
+
+            lines = output.splitlines()
+            ssh_hostname = lines[0].strip() if len(lines) > 0 else ""
+            os_version = lines[1].strip() if len(lines) > 1 else ""
+
+            if not ssh_hostname:
+                detail = f" stderr: {stderr_text}" if stderr_text else ""
+                return self._result(
+                    secret_name, target_host, None, None,
+                    f"Command returned no output.{detail}",
+                )
+
+            return self._result(
+                secret_name, target_host, ssh_hostname, os_version, None, status="success"
+            )
+
+        finally:
+            ssh.close()
+
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _result(secret_name, target_host, ssh_hostname, os_version, error, status=None):
+        if status is None:
+            status = "failed" if error else "success"
+        return {
+            "secret_name": secret_name,
+            "target_host": target_host,
+            "ssh_hostname": ssh_hostname,
+            "os_version": os_version,
+            "status": status,
+            "error": error,
+        }
+
+    @staticmethod
+    def _get_field_value(secret, candidate_slugs):
+        items = secret.get("items", [])
+        lowered = [s.lower() for s in candidate_slugs]
+        for item in items:
+            slug = (item.get("slug") or "").lower()
+            field_name = (item.get("fieldName") or "").lower()
+            if slug in lowered or field_name in lowered:
+                value = item.get("itemValue")
+                if value is None:
+                    value = item.get("value")
+                return value
+        return None
