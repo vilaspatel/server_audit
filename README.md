@@ -11,9 +11,6 @@ Each secret is expected to follow the **Azure-Linux-Root** template structure:
 | Username | `username` | SSH login username |
 | Password | `password` | SSH login password |
 
-The Secret Server SDK token and base URL are never hard-coded — they are read
-at runtime from the StackStorm KV store.
-
 ---
 
 ## Prerequisites
@@ -24,9 +21,24 @@ at runtime from the StackStorm KV store.
 | Python | 3.8 – 3.11 |
 | Delinea Secret Server | Any version exposing the v1 REST API |
 
-Network access is required from the StackStorm sensor/action runner to:
+Network access is required from the StackStorm action runner to:
 - The Secret Server HTTPS endpoint
 - Port 22 (or custom `ssh_port`) on every target server in the folder
+
+---
+
+## How Authentication Works
+
+The pack uses the **Delinea SDK Client onboarding flow** — no `tss` CLI required.
+
+**First run:**
+1. The action reads the **onboarding key** and **rule name** from ST2 KV.
+2. It calls `POST /api/v1/sdk-client-accounts` on Secret Server with those credentials. Secret Server validates the runner's IP address against the Client Onboarding Rule and returns a `clientId` and `clientSecret`.
+3. Those credentials are written back into ST2 KV (`ss_client_id` and `ss_client_secret`) so the registration endpoint is never called again.
+4. The action immediately exchanges the credentials for a fresh OAuth2 Bearer token via `POST /oauth2/token` and uses it for all API calls.
+
+**Subsequent runs:**
+- Steps 1–3 are skipped. The action reads the cached `ss_client_id` / `ss_client_secret` from KV, gets a fresh token, and proceeds directly to folder enumeration.
 
 ---
 
@@ -51,11 +63,9 @@ sudo git clone https://github.com/your-org/server_audit.git
 sudo st2 run packs.setup_virtualenv packs=server_audit
 ```
 
-This installs the libraries listed in `requirements.txt` into an isolated
-virtualenv for the pack:
+Dependencies installed (`requirements.txt`):
 
 ```
-python-tss-sdk
 paramiko
 requests
 ```
@@ -72,56 +82,52 @@ Verify the action is visible:
 st2 action list --pack server_audit
 ```
 
-Expected output:
-
-```
-+-----------------------------+--------------------------------------------------------------------+
-| ref                         | description                                                        |
-+-----------------------------+--------------------------------------------------------------------+
-| server_audit.audit_servers  | List every secret in a Secret Server folder, SSH into each server  |
-|                             | using the credentials stored in the secret (machine / username /   |
-|                             | password fields), and return the live hostname and OS version.     |
-+-----------------------------+--------------------------------------------------------------------+
-```
-
 ---
 
 ## Configuration
 
-No pack config file is required. All secrets are stored in the StackStorm KV store.
+### ST2 KV Setup
 
-### Store the Secret Server SDK token (encrypted)
-
-```bash
-st2 key set ss_sdk_token "<your-delinea-sdk-token>" --encrypt
-```
-
-### Store the Secret Server base URL (plain text)
+Set these three keys before the first run:
 
 ```bash
-st2 key set ss_url "https://secretserver.example.com"
+# Onboarding key from the SDK Client Management page → "Show Key" (encrypted)
+st2 key set ss_sdk_token "<Base64-onboarding-key>" --encrypt
+
+# SDK Client Onboarding Rule name (plain text)
+st2 key set ss_rule_name "MyOnboardingRule"
+
+# Secret Server base URL (plain text)
+st2 key set ss_url "https://wesco.secretservercloud.com"
 ```
 
-> **Custom key names** — if you need multiple Secret Server instances or prefer
-> different key names, pass `ss_kv_token_key` and `ss_kv_url_key` at run time
-> (see [Parameters](#parameters) below).
+The following two keys are **written automatically by the action on first run**.
+Do not set them manually unless recovering from a failed registration:
 
-### Verify the KV entries
+```bash
+# st2 key set ss_client_id "<client_id>"
+# st2 key set ss_client_secret "<client_secret>" --encrypt
+```
+
+### Verify KV entries
 
 ```bash
 st2 key list
 ```
 
-You should see both keys:
+Expected output after setup:
 
 ```
-+---------------+-----------+--------+
-| name          | scope     | secret |
-+---------------+-----------+--------+
-| ss_sdk_token  | system    | True   |
-| ss_url        | system    | False  |
-+---------------+-----------+--------+
++----------------+---------+--------+
+| name           | scope   | secret |
++----------------+---------+--------+
+| ss_sdk_token   | system  | True   |
+| ss_rule_name   | system  | False  |
+| ss_url         | system  | False  |
++----------------+---------+--------+
 ```
+
+After the first successful run, `ss_client_id` and `ss_client_secret` will also appear.
 
 ---
 
@@ -130,24 +136,33 @@ You should see both keys:
 ### Run against a folder (all defaults)
 
 ```bash
-st2 run server_audit.audit_servers folder_name="Linux Servers"
+st2 run server_audit.audit_servers folder_name="Azure-Linux"
 ```
 
 ### Run with a custom SSH port and timeout
 
 ```bash
 st2 run server_audit.audit_servers \
-  folder_name="Linux Servers" \
+  folder_name="Azure-Linux" \
   ssh_port=2222 \
   ssh_timeout=20
 ```
 
-### Run with non-default KV key names
+### Override the SDK client name used at registration
 
 ```bash
 st2 run server_audit.audit_servers \
-  folder_name="Linux Servers" \
-  ss_kv_token_key=prod_ss_token \
+  folder_name="Azure-Linux" \
+  ss_sdk_client_name="st2-automation-prod"
+```
+
+### Use non-default KV key names
+
+```bash
+st2 run server_audit.audit_servers \
+  folder_name="Azure-Linux" \
+  ss_kv_onboarding_key=prod_ss_sdk_token \
+  ss_kv_rule_name=prod_ss_rule_name \
   ss_kv_url_key=prod_ss_url
 ```
 
@@ -158,16 +173,32 @@ st2 run server_audit.audit_servers \
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `folder_name` | string | yes | — | Name of the Secret Server folder to enumerate |
-| `ss_kv_token_key` | string | no | `ss_sdk_token` | ST2 KV key holding the Secret Server SDK token (stored encrypted) |
-| `ss_kv_url_key` | string | no | `ss_url` | ST2 KV key holding the Secret Server base URL |
-| `ssh_port` | integer | no | `22` | SSH port to connect on |
-| `ssh_timeout` | integer | no | `10` | SSH connection timeout in seconds |
+| `ss_kv_onboarding_key` | string | no | `ss_sdk_token` | KV key holding the SDK onboarding key (encrypted) |
+| `ss_kv_rule_name` | string | no | `ss_rule_name` | KV key holding the SDK Client Onboarding Rule name |
+| `ss_kv_url_key` | string | no | `ss_url` | KV key holding the Secret Server base URL |
+| `ss_kv_cached_client_id` | string | no | `ss_client_id` | KV key where the action writes the registered client ID |
+| `ss_kv_cached_client_secret` | string | no | `ss_client_secret` | KV key where the action writes the registered client secret |
+| `ss_sdk_client_name` | string | no | runner hostname | SDK client name to register under (first run only) |
+| `ssh_port` | integer | no | `22` | SSH port |
+| `ssh_timeout` | integer | no | `10` | Connection timeout in seconds |
+
+---
+
+## KV Key Reference
+
+| KV Key | Encrypted | Set by | Purpose |
+|---|---|---|---|
+| `ss_sdk_token` | yes | operator | Onboarding key from SDK Client Management |
+| `ss_rule_name` | no | operator | SDK Client Onboarding Rule name |
+| `ss_url` | no | operator | Secret Server base URL |
+| `ss_client_id` | no | action (auto) | Registered SDK client ID |
+| `ss_client_secret` | yes | action (auto) | Registered SDK client secret |
 
 ---
 
 ## Output
 
-The action returns a list — one entry per secret found in the folder.
+A list — one entry per secret found in the folder:
 
 ```json
 [
@@ -185,92 +216,73 @@ The action returns a list — one entry per secret found in the folder.
     "ssh_hostname": null,
     "os_version": null,
     "status": "failed",
-    "error": "SSH authentication failed."
+    "error": "Authentication failed for user 'root' — check the password in Secret Server."
   }
 ]
 ```
 
 | Field | Description |
 |---|---|
-| `secret_name` | Name of the secret in Secret Server (used as an identifier) |
+| `secret_name` | Name of the secret in Secret Server |
 | `target_host` | Value of the `machine` field — the host that was connected to |
 | `ssh_hostname` | Output of `hostname` on the remote server; `null` on failure |
-| `os_version` | `PRETTY_NAME` from `/etc/os-release`, or `uname -sr` fallback; `null` on failure |
+| `os_version` | `PRETTY_NAME` from `/etc/os-release`; `null` on failure |
 | `status` | `success` or `failed` |
 | `error` | Error message on failure; `null` on success |
 
-A single unreachable server does **not** abort the run — the error is captured
-in that entry and the action continues with the remaining servers.
+A single unreachable server does **not** abort the run.
 
 ---
 
 ## Troubleshooting
 
-Individual host failures are captured per-entry in the results list and do **not**
-abort the run. The `error` field contains one of the messages below.
-
----
-
-### Secret Server errors (affect the whole run)
+### Secret Server / registration errors (abort the whole run)
 
 **`ST2 KV key 'ss_sdk_token' not found or empty`**
-: The KV key is missing or was stored without `--encrypt`. Re-set it:
-  ```bash
-  st2 key set ss_sdk_token "<token>" --encrypt
-  ```
+: Set the key: `st2 key set ss_sdk_token "<key>" --encrypt`
 
-**`Folder 'X' not found in Secret Server`**
-: The folder name must match exactly (case-insensitive). Confirm the name in the
-  Secret Server UI and ensure the SDK token has read access to that folder.
+**`ST2 KV key 'ss_rule_name' not found or empty`**
+: Set the key: `st2 key set ss_rule_name "MyOnboardingRule"`
+
+**`SDK registration rejected (HTTP 400)`**
+: The onboarding key is invalid or has the wrong format. Retrieve a fresh key from
+  **Secret Server → Admin → SDK Client Management → Show Key**.
+
+**`SDK registration denied (HTTP 403)`**
+: The ST2 runner's IP is not within the CIDR range allowed by the Client Onboarding
+  Rule, or the onboarding key has expired. Check the rule in **SDK Client Management**.
+
+**`SDK registration endpoint not found`**
+: The registration path is not found at either known location. Open
+  `{ss_url}/swagger` and search for `sdk-client-accounts` to find the correct path
+  on your Secret Server version.
+
+**`SDK registration conflict (HTTP 409)`**
+: A client with the same name already exists. Either:
+  1. Delete the existing SDK client in **Secret Server → Admin → SDK Client Management**, then re-run.
+  2. Or manually set `ss_client_id` and `ss_client_secret` in ST2 KV with the existing credentials and re-run (the action will use the cache and skip registration).
+
+**`OAuth2 token exchange failed`**
+: The cached `ss_client_id` / `ss_client_secret` are no longer valid (the SDK client
+  may have been deleted or revoked in Secret Server). Clear the cached keys and re-run
+  to trigger re-registration:
+  ```bash
+  st2 key delete ss_client_id
+  st2 key delete ss_client_secret
+  ```
 
 ---
 
-### Per-host errors (captured in the result, run continues)
+### Per-host SSH errors (captured in result, run continues)
 
-**`Authentication failed for user 'root' — check the password in Secret Server`**
-: The stored password is wrong or has expired. In the Secret Server UI the secret's
-  `lastHeartBeatStatus` will show `Failed` when this happens.
-
-**`DNS resolution failed for 'hostname.example.com': Name or service not known`**
-: The FQDN in the `machine` field cannot be resolved. Verify the value in the
-  secret and that the ST2 action runner's DNS can reach the target domain.
-
-**`Connection timed out after 10s — hostname.example.com:22 is unreachable or too slow`**
-: The host is not reachable on the SSH port within the timeout window. Check
-  firewall rules and increase `ssh_timeout` if the host is genuinely slow to respond.
-
-**`Connection refused — nothing is listening on hostname.example.com:22`**
-: SSH is not running on the target or is on a non-standard port. Verify the service
-  is up, or pass a custom `ssh_port` if it differs from 22.
-
-**`Could not open any SSH connections to hostname.example.com:22`**
-: Paramiko exhausted all connection attempts. This usually means an intermediate
-  network device (load balancer, proxy) is dropping the packets silently.
-
-**`SSH handshake/banner error connecting to hostname.example.com:22`**
-: The TCP connection succeeded but SSH negotiation failed — the remote may not be
-  an SSH server, or it rejected the client's algorithms. Check the sshd config on
-  the target.
-
-**`Network error connecting to hostname.example.com:22`**
-: A general OS-level error (e.g. no route to host, network unreachable). The full
-  OS error string is included in the message for diagnosis.
-
-**`Remote command timed out after 10s`**
-: Connected successfully but the `hostname` / `os-release` command did not complete
-  within the timeout. The host may be under extreme load. Increase `ssh_timeout`.
-
-**`Failed to execute remote command`**
-: The SSH channel was lost after the connection was established. Usually indicates
-  the sshd process on the target crashed or the session was forcibly closed.
-
-**`Command returned no output`**
-: The remote command ran but produced nothing on stdout. Any stderr output is
-  appended to the error message to help diagnose the cause.
-
-**`Secret is missing the 'machine' field`**
-: The secret exists in Secret Server but has no `machine` slug/field. Update the
-  secret in the UI to add the FQDN or IP address.
-
-**`Secret is missing username or password field`**
-: One or both credential fields are blank in Secret Server. Update the secret.
+| Error | Cause |
+|---|---|
+| `Authentication failed for user 'root'` | Wrong or expired password in Secret Server |
+| `DNS resolution failed for 'host'` | FQDN in the `machine` field cannot be resolved |
+| `Connection timed out after 10s` | Host unreachable on SSH port; increase `ssh_timeout` or check firewall |
+| `Connection refused on host:22` | SSH not running or on a different port |
+| `SSH handshake/banner error` | TCP connected but SSH negotiation failed |
+| `Remote command timed out` | Host connected but command did not complete; increase `ssh_timeout` |
+| `Command returned no output` | Command ran but stdout was empty; stderr hint included |
+| `Secret is missing the 'machine' field'` | Secret exists but has no FQDN/IP stored |
+| `Secret is missing username or password field` | One or both credential fields are blank |

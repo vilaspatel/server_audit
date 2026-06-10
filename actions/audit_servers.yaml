@@ -3,8 +3,10 @@ name: audit_servers
 description: >
   List every secret in a Secret Server folder, SSH into each server using the
   credentials stored in the secret (machine / username / password fields), and
-  return the live hostname and OS version. The Secret Server SDK token is read
-  from ST2 KV (encrypted).
+  return the live hostname and OS version.
+  Authentication to Secret Server uses the SDK onboarding key + rule name stored
+  in ST2 KV. On first run the action registers an SDK client and caches the
+  resulting credentials in KV; subsequent runs use the cache.
 runner_type: python-script
 entry_point: audit_servers.py
 enabled: true
@@ -13,16 +15,46 @@ parameters:
     type: string
     description: Exact name of the Secret Server folder to enumerate.
     required: true
-  ss_kv_token_key:
+  ss_kv_onboarding_key:
     type: string
-    description: ST2 KV key that holds the Secret Server SDK token (stored encrypted).
+    description: >
+      ST2 KV key holding the Delinea SDK onboarding key (Base64, stored encrypted).
+      Shown on the SDK Client Management page under "Show Key".
     required: false
     default: ss_sdk_token
+  ss_kv_rule_name:
+    type: string
+    description: >
+      ST2 KV key holding the SDK Client Onboarding Rule name configured in
+      Secret Server (plain text).
+    required: false
+    default: ss_rule_name
   ss_kv_url_key:
     type: string
-    description: ST2 KV key that holds the Secret Server base URL.
+    description: ST2 KV key holding the Secret Server base URL (plain text).
     required: false
     default: ss_url
+  ss_kv_cached_client_id:
+    type: string
+    description: >
+      ST2 KV key where the action writes the registered SDK client ID after
+      the first successful registration. Do not set manually.
+    required: false
+    default: ss_client_id
+  ss_kv_cached_client_secret:
+    type: string
+    description: >
+      ST2 KV key where the action writes the registered SDK client secret
+      (encrypted) after the first successful registration. Do not set manually.
+    required: false
+    default: ss_client_secret
+  ss_sdk_client_name:
+    type: string
+    description: >
+      Name to register the SDK client under in Secret Server. Defaults to the
+      ST2 runner's hostname when not set. Only relevant on the first run.
+    required: false
+    default: null
   ssh_port:
     type: integer
     description: SSH port to connect on.
