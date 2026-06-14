@@ -23,8 +23,8 @@ st2 action list --pack server_audit   # verify
 ### KV setup (required before first run)
 
 ```bash
-st2 key set ss_client_id  "<client-id>"
-st2 key set ss_client_secret "<client-secret>" --encrypt
+st2 key set ss_username "AnsibleAPI"
+st2 key set ss_password "<password>" --encrypt
 st2 key set ss_url "https://your-instance.secretservercloud.com"
 st2 key list   # verify
 ```
@@ -37,8 +37,8 @@ st2 run server_audit.audit_servers folder_name="Azure-Linux" ssh_port=2222 ssh_t
 
 # Use non-default KV key names (e.g. for a prod vs staging split)
 st2 run server_audit.audit_servers folder_name="Azure-Linux" \
-  ss_kv_client_id=prod_ss_client_id \
-  ss_kv_client_secret=prod_ss_client_secret \
+  ss_kv_username=prod_ss_username \
+  ss_kv_password=prod_ss_password \
   ss_kv_url_key=prod_ss_url
 ```
 
@@ -79,7 +79,7 @@ for each secret:
 
 ### Key design decisions
 
-- **All config comes from ST2 KV**, never from action parameters directly. The `ss_kv_*` parameters are just the *names* of the KV keys, not the values. `client_secret` is read with `decrypt=True`; everything else is plain text.
+- **All config comes from ST2 KV**, never from action parameters directly. The `ss_kv_*` parameters are just the *names* of the KV keys, not the values. `ss_password` is read with `decrypt=True`; everything else is plain text.
 
 - **Folder resolution** does a case-insensitive exact match first; falls back to the first search result with a warning. Raises if no results at all.
 
@@ -94,15 +94,23 @@ for each secret:
 ```json
 [
   {
-    "secret_name": "myserver_root",
-    "target_host": "myserver.example.com",
-    "ssh_hostname": "myserver",
-    "os_version": "Red Hat Enterprise Linux 8.10 (Ootpa)",
+    "secret_name": "w2lcslogcl06p_root",
+    "target_host": "w2lcslogcl06p.wescodist.com",
+    "ssh_hostname": "w2lcslogcl06p",
+    "ip_address": "10.1.2.3",
     "status": "success",
     "error": null
+  },
+  {
+    "secret_name": "w2lcslogcl07p_root",
+    "target_host": "w2lcslogcl07p.wescodist.com",
+    "ssh_hostname": null,
+    "ip_address": null,
+    "status": "failed",
+    "error": "Authentication failed for user 'root' — check the password in Secret Server."
   }
 ]
 ```
 
-`ssh_hostname` and `os_version` are `null` on failure. A failed host does not stop the run.
+`target_host` is always the `machine` field from the secret, even on failure. `ssh_hostname` and `ip_address` are `null` on failure. A failed host does not stop the run.
 

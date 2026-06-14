@@ -1,7 +1,7 @@
 # server_audit Pack
 
 Enumerates every secret inside a Delinea Secret Server folder and SSH-probes each
-server to verify connectivity and collect the live hostname and OS version.
+server to verify connectivity and collect the live hostname and IP address.
 
 Each secret is expected to follow the **Azure-Linux-Root** template structure:
 
@@ -29,12 +29,10 @@ Network access is required from the StackStorm action runner to:
 
 ## How Authentication Works
 
-The action authenticates using a **Secret Server SDK client_id and client_secret**
-stored in ST2 KV. On each run it exchanges those credentials for a fresh OAuth2
-Bearer token via `POST /oauth2/token` and uses it for all API calls.
-
-You must create the SDK client in Secret Server first (**Admin → SDK Client Management**)
-and store the resulting credentials in ST2 KV before running the action.
+The action authenticates using a **Secret Server username and password** stored in
+ST2 KV. On each run it performs a password grant to `POST /oauth2/token` and uses
+the resulting Bearer token for all API calls — the same credential flow used by the
+Delinea python-tss-sdk `PasswordGrantAuthorizer`.
 
 ---
 
@@ -80,11 +78,11 @@ st2 action list --pack server_audit
 Set these three keys before the first run:
 
 ```bash
-# SDK client ID from Secret Server → Admin → SDK Client Management (plain text)
-st2 key set ss_client_id "<client-id>"
+# Secret Server username (plain text)
+st2 key set ss_username "AnsibleAPI"
 
-# SDK client secret (stored encrypted)
-st2 key set ss_client_secret "<client-secret>" --encrypt
+# Secret Server password (stored encrypted)
+st2 key set ss_password "<password>" --encrypt
 
 # Secret Server base URL (plain text)
 st2 key set ss_url "https://your-instance.secretservercloud.com"
@@ -99,13 +97,13 @@ st2 key list
 Expected output:
 
 ```
-+------------------+---------+--------+
-| name             | scope   | secret |
-+------------------+---------+--------+
-| ss_client_id     | system  | False  |
-| ss_client_secret | system  | True   |
-| ss_url           | system  | False  |
-+------------------+---------+--------+
++-------------+---------+--------+
+| name        | scope   | secret |
++-------------+---------+--------+
+| ss_username | system  | False  |
+| ss_password | system  | True   |
+| ss_url      | system  | False  |
++-------------+---------+--------+
 ```
 
 ---
@@ -132,8 +130,8 @@ st2 run server_audit.audit_servers \
 ```bash
 st2 run server_audit.audit_servers \
   folder_name="Azure-Linux" \
-  ss_kv_client_id=prod_ss_client_id \
-  ss_kv_client_secret=prod_ss_client_secret \
+  ss_kv_username=prod_ss_username \
+  ss_kv_password=prod_ss_password \
   ss_kv_url_key=prod_ss_url
 ```
 
@@ -144,8 +142,8 @@ st2 run server_audit.audit_servers \
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `folder_name` | string | yes | — | Name of the Secret Server folder to enumerate |
-| `ss_kv_client_id` | string | no | `ss_client_id` | KV key holding the SDK client ID (plain text) |
-| `ss_kv_client_secret` | string | no | `ss_client_secret` | KV key holding the SDK client secret (encrypted) |
+| `ss_kv_username` | string | no | `ss_username` | KV key holding the Secret Server username (plain text) |
+| `ss_kv_password` | string | no | `ss_password` | KV key holding the Secret Server password (encrypted) |
 | `ss_kv_url_key` | string | no | `ss_url` | KV key holding the Secret Server base URL |
 | `ssh_port` | integer | no | `22` | SSH port |
 | `ssh_timeout` | integer | no | `10` | Connection timeout in seconds |
@@ -156,8 +154,8 @@ st2 run server_audit.audit_servers \
 
 | KV Key | Encrypted | Set by | Purpose |
 |---|---|---|---|
-| `ss_client_id` | no | operator | SDK client ID from Secret Server |
-| `ss_client_secret` | yes | operator | SDK client secret from Secret Server |
+| `ss_username` | no | operator | Secret Server login username |
+| `ss_password` | yes | operator | Secret Server login password |
 | `ss_url` | no | operator | Secret Server base URL |
 
 ---
@@ -172,7 +170,7 @@ A list — one entry per secret found in the folder:
     "secret_name": "w2lcslogcl06p_root",
     "target_host": "w2lcslogcl06p.wescodist.com",
     "ssh_hostname": "w2lcslogcl06p",
-    "os_version": "Red Hat Enterprise Linux 8.10 (Ootpa)",
+    "ip_address": "10.1.2.3",
     "status": "success",
     "error": null
   },
@@ -180,7 +178,7 @@ A list — one entry per secret found in the folder:
     "secret_name": "w2lcslogcl07p_root",
     "target_host": "w2lcslogcl07p.wescodist.com",
     "ssh_hostname": null,
-    "os_version": null,
+    "ip_address": null,
     "status": "failed",
     "error": "Authentication failed for user 'root' — check the password in Secret Server."
   }
@@ -192,7 +190,7 @@ A list — one entry per secret found in the folder:
 | `secret_name` | Name of the secret in Secret Server |
 | `target_host` | Value of the `machine` field — the host that was connected to |
 | `ssh_hostname` | Output of `hostname` on the remote server; `null` on failure |
-| `os_version` | `PRETTY_NAME` from `/etc/os-release`; `null` on failure |
+| `ip_address` | Primary IP from `hostname -I`; `null` on failure |
 | `status` | `success` or `failed` |
 | `error` | Error message on failure; `null` on success |
 
@@ -204,18 +202,17 @@ A single unreachable server does **not** abort the run.
 
 ### Secret Server / authentication errors (abort the whole run)
 
-**`ST2 KV key 'ss_client_id' not found or empty`**
-: Set the key: `st2 key set ss_client_id "<client-id>"`
+**`ST2 KV key 'ss_username' not found or empty`**
+: Set the key: `st2 key set ss_username "AnsibleAPI"`
 
-**`ST2 KV key 'ss_client_secret' not found or empty`**
-: Set the key: `st2 key set ss_client_secret "<client-secret>" --encrypt`
+**`ST2 KV key 'ss_password' not found or empty`**
+: Set the key: `st2 key set ss_password "<password>" --encrypt`
 
-**`OAuth2 token exchange failed [401]`**
-: The client credentials are invalid or the SDK client has been deleted/revoked in
-  Secret Server. Recreate the client under **Admin → SDK Client Management** and
-  update the KV keys.
+**`Secret Server authentication failed [400]`**
+: Username or password is wrong. Verify with:
+  `python3 list_folder_secrets.py --base-url <url> --username <user> --password <pass> --folder-id 617`
 
-**`OAuth2 token exchange failed [4xx]`**
+**`Secret Server authentication failed [4xx]`**
 : Check that `ss_url` points to the correct Secret Server instance and that the
   OAuth2 endpoint `{ss_url}/oauth2/token` is reachable from the ST2 runner.
 

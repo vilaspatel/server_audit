@@ -3,9 +3,9 @@ name: audit_servers
 description: >
   List every secret in a Secret Server folder, SSH into each server using the
   credentials stored in the secret (machine / username / password fields), and
-  return the live hostname and OS version.
-  Authentication to Secret Server uses a client_id and client_secret stored in
-  ST2 KV to obtain an OAuth2 Bearer token.
+  return the live hostname and IP address.
+  Authentication to Secret Server uses a username and password stored in ST2 KV
+  to obtain an OAuth2 Bearer token via password grant.
 runner_type: python-script
 entry_point: audit_servers.py
 enabled: true
@@ -14,16 +14,16 @@ parameters:
     type: string
     description: Exact name of the Secret Server folder to enumerate.
     required: true
-  ss_kv_client_id:
+  ss_kv_username:
     type: string
-    description: ST2 KV key holding the Secret Server SDK client ID (plain text).
+    description: ST2 KV key holding the Secret Server username (plain text).
     required: false
-    default: ss_client_id
-  ss_kv_client_secret:
+    default: ss_username
+  ss_kv_password:
     type: string
-    description: ST2 KV key holding the Secret Server SDK client secret (stored encrypted).
+    description: ST2 KV key holding the Secret Server password (stored encrypted).
     required: false
-    default: ss_client_secret
+    default: ss_password
   ss_kv_url_key:
     type: string
     description: ST2 KV key holding the Secret Server base URL (plain text).

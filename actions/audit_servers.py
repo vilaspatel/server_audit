@@ -9,42 +9,43 @@ _PAGE_SIZE = 100
 
 class AuditServersAction(Action):
     """
-    1. Read client_id, client_secret, and URL from ST2 KV.
-    2. Exchange credentials for a fresh OAuth2 Bearer token.
+    1. Read username, password, and URL from ST2 KV.
+    2. Obtain a Bearer token via password grant (POST /oauth2/token).
     3. Find the requested folder and list every secret it contains.
-    4. For each secret: SSH to the 'machine' field host, run hostname +
-       /etc/os-release, and return the result.
+    4. For each secret: SSH to the 'machine' field host, run hostname + IP lookup,
+       and return the result. Unreachable hosts are captured as failures and do not
+       abort the run — the machine field from the secret is always included.
     """
 
     def run(
         self,
         folder_name,
-        ss_kv_client_id,
-        ss_kv_client_secret,
+        ss_kv_username,
+        ss_kv_password,
         ss_kv_url_key,
         ssh_port,
         ssh_timeout,
     ):
         # ── Read config from ST2 KV ────────────────────────────────────────
-        client_id = (
-            self.action_service.get_value(ss_kv_client_id, decrypt=False, local=False) or ""
+        username = (
+            self.action_service.get_value(ss_kv_username, decrypt=False, local=False) or ""
         ).strip()
-        client_secret = (
-            self.action_service.get_value(ss_kv_client_secret, decrypt=True, local=False) or ""
+        password = (
+            self.action_service.get_value(ss_kv_password, decrypt=True, local=False) or ""
         ).strip()
         ss_url = (
             self.action_service.get_value(ss_kv_url_key, decrypt=False, local=False) or ""
         ).strip().rstrip("/")
 
-        if not client_id:
-            raise Exception(f"ST2 KV key '{ss_kv_client_id}' not found or empty.")
-        if not client_secret:
-            raise Exception(f"ST2 KV key '{ss_kv_client_secret}' not found or empty.")
+        if not username:
+            raise Exception(f"ST2 KV key '{ss_kv_username}' not found or empty.")
+        if not password:
+            raise Exception(f"ST2 KV key '{ss_kv_password}' not found or empty.")
         if not ss_url:
             raise Exception(f"ST2 KV key '{ss_kv_url_key}' not found or empty.")
 
         # ── Obtain Bearer token ────────────────────────────────────────────
-        ss_token = self._exchange_oauth2_token(ss_url, client_id, client_secret)
+        ss_token = self._get_token(ss_url, username, password)
 
         # ── Enumerate folder and probe each server ─────────────────────────
         folder_id = self._resolve_folder_id(ss_url, ss_token, folder_name)
@@ -70,7 +71,7 @@ class AuditServersAction(Action):
                 f"{secret_name} ({result.get('target_host')}): "
                 f"status={result['status']}  "
                 f"ssh_hostname={result.get('ssh_hostname')}  "
-                f"os_version={result.get('os_version')}  "
+                f"ip_address={result.get('ip_address')}  "
                 f"error={result.get('error')}"
             )
             results.append(result)
@@ -81,16 +82,16 @@ class AuditServersAction(Action):
     # Authentication
     # ------------------------------------------------------------------
 
-    def _exchange_oauth2_token(self, ss_url, client_id, client_secret):
-        """Exchange client_id + client_secret for a fresh Bearer access token."""
+    def _get_token(self, ss_url, username, password):
+        """Obtain a Bearer token via username/password grant."""
         token_url = f"{ss_url}/oauth2/token"
         try:
             response = requests.post(
                 token_url,
                 data={
-                    "grant_type": "client_credentials",
-                    "client_id": client_id,
-                    "client_secret": client_secret,
+                    "grant_type": "password",
+                    "username": username,
+                    "password": password,
                 },
                 timeout=30,
             )
@@ -98,16 +99,9 @@ class AuditServersAction(Action):
         except requests.HTTPError as exc:
             status = exc.response.status_code
             body = exc.response.text.strip()
-            hint = ""
-            if status == 400 and "invalid_client" in body:
-                hint = (
-                    " Verify that ss_client_id and ss_client_secret in ST2 KV match "
-                    "the credentials shown in Secret Server → Admin → SDK Client Management. "
-                    "Re-set with: st2 key set ss_client_id <id> && "
-                    "st2 key set ss_client_secret <secret> --encrypt"
-                )
             raise Exception(
-                f"OAuth2 token exchange failed [{status}]: {body}.{hint}"
+                f"Secret Server authentication failed [{status}]: {body}. "
+                f"Check ss_username / ss_password in ST2 KV."
             )
         except requests.RequestException as exc:
             raise Exception(
@@ -209,11 +203,12 @@ class AuditServersAction(Action):
 
         return self._ssh_probe(secret_name, target_host, username, password, ssh_port, ssh_timeout)
 
-    # Line 0: hostname; line 1: PRETTY_NAME from /etc/os-release,
-    # falling back to `uname -sr` on systems without /etc/os-release.
+    # Line 0: hostname
+    # Line 1: space-separated IP addresses (hostname -I), falling back to
+    #         hostname -i (resolves via DNS) on older systems that lack -I.
     _PROBE_CMD = (
         "hostname; "
-        "(awk -F'\"' '/^PRETTY_NAME/{print $2}' /etc/os-release 2>/dev/null || uname -sr)"
+        "hostname -I 2>/dev/null || hostname -i 2>/dev/null || echo N/A"
     )
 
     def _ssh_probe(self, secret_name, target_host, username, password, port, timeout):
@@ -285,7 +280,8 @@ class AuditServersAction(Action):
 
             lines = output.splitlines()
             ssh_hostname = lines[0].strip() if len(lines) > 0 else ""
-            os_version = lines[1].strip() if len(lines) > 1 else ""
+            # Take the first IP from the space-separated list returned by hostname -I.
+            ip_address = (lines[1].split()[0] if len(lines) > 1 and lines[1].strip() else "")
 
             if not ssh_hostname:
                 detail = f" stderr: {stderr_text}" if stderr_text else ""
@@ -295,7 +291,7 @@ class AuditServersAction(Action):
                 )
 
             return self._result(
-                secret_name, target_host, ssh_hostname, os_version, None, status="success"
+                secret_name, target_host, ssh_hostname, ip_address, None, status="success"
             )
 
         finally:
@@ -306,14 +302,14 @@ class AuditServersAction(Action):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _result(secret_name, target_host, ssh_hostname, os_version, error, status=None):
+    def _result(secret_name, target_host, ssh_hostname, ip_address, error, status=None):
         if status is None:
             status = "failed" if error else "success"
         return {
             "secret_name": secret_name,
-            "target_host": target_host,
+            "target_host": target_host,   # machine field from the secret — always present
             "ssh_hostname": ssh_hostname,
-            "os_version": os_version,
+            "ip_address": ip_address,
             "status": status,
             "error": error,
         }
