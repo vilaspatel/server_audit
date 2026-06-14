@@ -77,6 +77,7 @@ class AuditServersAction(Action):
             )
             results.append(result)
 
+        self.logger.info("\n" + self._format_table(results))
         return results
 
     # ------------------------------------------------------------------
@@ -314,6 +315,40 @@ class AuditServersAction(Action):
             "status": status,
             "error": error,
         }
+
+    @staticmethod
+    def _format_table(results):
+        _MAX_ERROR = 60
+        headers = ["Secret Name", "Target Host", "SSH Hostname", "IP Address", "Status", "Error"]
+        rows = [
+            [
+                r.get("secret_name") or "-",
+                r.get("target_host") or "-",
+                r.get("ssh_hostname") or "-",
+                r.get("ip_address") or "-",
+                r.get("status") or "-",
+                (r.get("error") or "")[:_MAX_ERROR],
+            ]
+            for r in results
+        ]
+
+        widths = [len(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                widths[i] = max(widths[i], len(cell))
+
+        sep = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+
+        def fmt(cells):
+            return "|" + "|".join(f" {str(c):<{w}} " for c, w in zip(cells, widths)) + "|"
+
+        lines = [sep, fmt(headers), sep] + [fmt(r) for r in rows] + [sep]
+
+        success = sum(1 for r in results if r.get("status") == "success")
+        failed  = len(results) - success
+        lines.append(f"  Total: {len(results)}  |  Success: {success}  |  Failed: {failed}")
+
+        return "\n".join(lines)
 
     @staticmethod
     def _get_field_value(secret, candidate_slugs):
