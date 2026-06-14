@@ -1,6 +1,7 @@
 import socket
 
 import paramiko
+import paramiko.ssh_exception
 import requests
 from st2common.runners.base_action import Action
 
@@ -231,7 +232,7 @@ class AuditServersAction(Action):
                     secret_name, target_host, None, None,
                     f"Authentication failed for user '{username}' — check the password in Secret Server.",
                 )
-            except paramiko.NoValidConnectionsError as exc:
+            except paramiko.ssh_exception.NoValidConnectionsError as exc:
                 return self._result(
                     secret_name, target_host, None, None,
                     f"Could not open any SSH connections to {target_host}:{port}: {exc}",
