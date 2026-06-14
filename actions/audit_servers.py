@@ -26,15 +26,15 @@ class AuditServersAction(Action):
         ssh_timeout,
     ):
         # ── Read config from ST2 KV ────────────────────────────────────────
-        client_id = self.action_service.get_value(
-            ss_kv_client_id, decrypt=False, local=False
-        )
-        client_secret = self.action_service.get_value(
-            ss_kv_client_secret, decrypt=True, local=False
-        )
+        client_id = (
+            self.action_service.get_value(ss_kv_client_id, decrypt=False, local=False) or ""
+        ).strip()
+        client_secret = (
+            self.action_service.get_value(ss_kv_client_secret, decrypt=True, local=False) or ""
+        ).strip()
         ss_url = (
             self.action_service.get_value(ss_kv_url_key, decrypt=False, local=False) or ""
-        ).rstrip("/")
+        ).strip().rstrip("/")
 
         if not client_id:
             raise Exception(f"ST2 KV key '{ss_kv_client_id}' not found or empty.")
@@ -96,9 +96,18 @@ class AuditServersAction(Action):
             )
             response.raise_for_status()
         except requests.HTTPError as exc:
+            status = exc.response.status_code
+            body = exc.response.text.strip()
+            hint = ""
+            if status == 400 and "invalid_client" in body:
+                hint = (
+                    " Verify that ss_client_id and ss_client_secret in ST2 KV match "
+                    "the credentials shown in Secret Server → Admin → SDK Client Management. "
+                    "Re-set with: st2 key set ss_client_id <id> && "
+                    "st2 key set ss_client_secret <secret> --encrypt"
+                )
             raise Exception(
-                f"OAuth2 token exchange failed [{exc.response.status_code}]: "
-                f"{exc.response.text.strip()}"
+                f"OAuth2 token exchange failed [{status}]: {body}.{hint}"
             )
         except requests.RequestException as exc:
             raise Exception(

@@ -106,6 +106,3 @@ for each secret:
 
 `ssh_hostname` and `os_version` are `null` on failure. A failed host does not stop the run.
 
-## Note on README.md
-
-`README.md` describes the old SDK onboarding flow (onboarding key + rule name + auto-registration). That flow has been removed. The code now uses direct `client_id` / `client_secret` KV keys. The README should be updated to reflect this if it is published externally.
