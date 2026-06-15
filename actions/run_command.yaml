@@ -1,0 +1,47 @@
+---
+name: run_command
+description: >
+  For each host in the supplied inventory, look up SSH credentials in Secret Server
+  (tries <short_hostname>_root first, falls back to <short_hostname>_sysadmin), run
+  the user-supplied command, and return a table-formatted result.
+  Non-auth connection errors (DNS failure, timeout, refused) are recorded immediately
+  without attempting the fallback credential.
+runner_type: python-script
+entry_point: run_command.py
+enabled: true
+parameters:
+  hosts:
+    type: array
+    description: >
+      List of fully-qualified hostnames to target,
+      e.g. ["hqora-prd-app02.wescodist.com", "hqora-prd-app03.wescodist.com"].
+    required: true
+  command:
+    type: string
+    description: Shell command to run on each host via SSH.
+    required: true
+  ss_kv_username:
+    type: string
+    description: ST2 KV key holding the Secret Server username (plain text).
+    required: false
+    default: ss_username
+  ss_kv_password:
+    type: string
+    description: ST2 KV key holding the Secret Server password (stored encrypted).
+    required: false
+    default: ss_password
+  ss_kv_url_key:
+    type: string
+    description: ST2 KV key holding the Secret Server base URL (plain text).
+    required: false
+    default: ss_url
+  ssh_port:
+    type: integer
+    description: SSH port to connect on.
+    required: false
+    default: 22
+  ssh_timeout:
+    type: integer
+    description: SSH connection and command timeout in seconds.
+    required: false
+    default: 10
