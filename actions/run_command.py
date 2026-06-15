@@ -50,7 +50,7 @@ class RunCommandAction(Action):
         ss_token = self._get_token(ss_url, ss_username, ss_password)
 
         results = []
-        for host in hosts:
+        for host in [h.strip() for h in hosts.split(",")]:
             host = host.strip()
             if not host:
                 continue

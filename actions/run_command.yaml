@@ -11,12 +11,8 @@ entry_point: run_command.py
 enabled: true
 parameters:
   hosts:
-    type: array
-    items:
-      type: string
-    description: >
-      List of fully-qualified hostnames to target,
-      e.g. ["hqora-prd-app02.wescodist.com", "hqora-prd-app03.wescodist.com"].
+    type: string
+    description: "Comma-separated FQDNs: hqora-prd-app02.wescodist.com,hqora-prd-app03.wescodist.com"
     required: true
   command:
     type: string
