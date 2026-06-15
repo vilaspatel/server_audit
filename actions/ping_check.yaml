@@ -1,12 +1,13 @@
 ---
 name: ping_check
 description: >
-  For each host in a comma-separated inventory, perform a DNS lookup (nslookup-style,
-  all returned IPs) and a ping test (packet loss + average RTT). Both checks run
-  independently; results are returned in a table format.
+  For each host in a comma-separated inventory, perform a DNS lookup (all returned IPs)
+  and a ping test (packet loss + average RTT). Hosts are checked in parallel.
+  Both checks run independently; results are returned in a table format.
 runner_type: python-script
 entry_point: ping_check.py
 enabled: true
+timeout: 3600
 parameters:
   hosts:
     type: string
@@ -22,3 +23,8 @@ parameters:
     description: Per-packet wait time in seconds (passed to ping -W).
     required: false
     default: 2
+  max_workers:
+    type: integer
+    description: Number of hosts to probe in parallel. Raise for large inventories.
+    required: false
+    default: 50

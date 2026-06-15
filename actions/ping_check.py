@@ -1,6 +1,7 @@
 import re
 import socket
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from st2common.runners.base_action import Action
 
@@ -10,22 +11,38 @@ class PingCheckAction(Action):
     For each host in the comma-separated inventory:
       - DNS lookup via socket.gethostbyname_ex (all returned IPs)
       - Ping test via system ping binary (packet loss + avg RTT)
+    Hosts are checked in parallel (max_workers controls concurrency).
     Both checks run regardless of each other; failures are captured per-host.
     """
 
-    def run(self, hosts, ping_count, ping_timeout):
-        results = []
-        for host in [h.strip() for h in hosts.split(",")]:
-            if not host:
-                continue
-            result = self._check_host(host, ping_count, ping_timeout)
-            self.logger.info(
-                f"{host}: dns={result['dns_status']}  ping={result['ping_status']}  "
-                f"ips={result['ip_addresses']}  loss={result['packet_loss']}  "
-                f"rtt={result['avg_rtt_ms']}"
-            )
-            results.append(result)
+    def run(self, hosts, ping_count, ping_timeout, max_workers):
+        host_list = [h.strip() for h in hosts.split(",") if h.strip()]
+        self.logger.info(
+            f"Checking {len(host_list)} hosts with {max_workers} parallel workers "
+            f"(ping_count={ping_count}, ping_timeout={ping_timeout}s)"
+        )
 
+        results_map = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._check_host, host, ping_count, ping_timeout): host
+                for host in host_list
+            }
+            for future in as_completed(futures):
+                host = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = self._error_result(host, str(exc))
+                self.logger.info(
+                    f"{host}: dns={result['dns_status']}  ping={result['ping_status']}  "
+                    f"ips={result['ip_addresses']}  loss={result['packet_loss']}  "
+                    f"rtt={result['avg_rtt_ms']}"
+                )
+                results_map[host] = result
+
+        # Preserve original input order
+        results = [results_map[h] for h in host_list if h in results_map]
         self.logger.info("\n" + self._format_table(results))
         return results
 
@@ -46,6 +63,18 @@ class PingCheckAction(Action):
             "packet_loss": packet_loss,
             "avg_rtt_ms": avg_rtt,
             "error": " | ".join(errors) if errors else None,
+        }
+
+    @staticmethod
+    def _error_result(host, error):
+        return {
+            "host": host,
+            "ip_addresses": "-",
+            "dns_status": "error",
+            "ping_status": "error",
+            "packet_loss": "N/A",
+            "avg_rtt_ms": "N/A",
+            "error": error,
         }
 
     def _dns_lookup(self, host):
