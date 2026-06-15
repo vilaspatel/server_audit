@@ -1,0 +1,24 @@
+---
+name: ping_check
+description: >
+  For each host in a comma-separated inventory, perform a DNS lookup (nslookup-style,
+  all returned IPs) and a ping test (packet loss + average RTT). Both checks run
+  independently; results are returned in a table format.
+runner_type: python-script
+entry_point: ping_check.py
+enabled: true
+parameters:
+  hosts:
+    type: string
+    description: "Comma-separated FQDNs or IPs: host1.example.com,host2.example.com"
+    required: true
+  ping_count:
+    type: integer
+    description: Number of ICMP echo requests to send per host.
+    required: false
+    default: 3
+  ping_timeout:
+    type: integer
+    description: Per-packet wait time in seconds (passed to ping -W).
+    required: false
+    default: 2
